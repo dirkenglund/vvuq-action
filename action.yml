@@ -101,7 +101,7 @@ runs:
         REVIEW_ID=$(echo "$SUBMIT_RESPONSE" | jq -r '.review_id // "unknown"')
 
         # Step 2: Fetch review results
-        REVIEW=$(curl -s "${{ inputs.api-url }}/review/$REVIEW_ID" \
+        REVIEW=$(curl -s "${{ inputs.api-url }}/api/v1/review/$REVIEW_ID" \
           -H "X-API-Key: ${{ inputs.api-key }}")
 
         # Extract metrics from results
