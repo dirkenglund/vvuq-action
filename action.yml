@@ -90,6 +90,7 @@ runs:
         # Submit for review
         REVIEW=$(curl -s -X POST "${{ inputs.api-url }}/review/submit" \
           -H "Content-Type: application/json" \
+          -H "X-API-Key: ${{ inputs.api-key }}" \
           -d "{
             \"content\": $(echo \"$CODE\" | jq -Rs .),
             \"rulesets\": $RULESETS_JSON,
