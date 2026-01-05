@@ -93,7 +93,7 @@ runs:
           -H "X-API-Key: ${{ inputs.api-key }}" \
           -d "{
             \"content\": $(echo \"$CODE\" | jq -Rs .),
-            \"rulesets\": $RULESETS_JSON,
+            \"ruleset_ids\": $RULESETS_JSON,
             \"content_type\": \"auto\"
           }")
 
