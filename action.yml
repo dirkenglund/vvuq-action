@@ -87,8 +87,8 @@ runs:
         IFS=',' read -ra RULESETS_ARRAY <<< "${{ inputs.rulesets }}"
         RULESETS_JSON=$(printf '%s\n' "${RULESETS_ARRAY[@]}" | jq -R . | jq -s .)
 
-        # Submit for review
-        REVIEW=$(curl -s -X POST "${{ inputs.api-url }}/review/submit" \
+        # Step 1: Submit for review
+        SUBMIT_RESPONSE=$(curl -s -X POST "${{ inputs.api-url }}/review/submit" \
           -H "Content-Type: application/json" \
           -H "X-API-Key: ${{ inputs.api-key }}" \
           -d "{
@@ -97,11 +97,17 @@ runs:
             \"content_type\": \"auto\"
           }")
 
-        # Extract metrics
+        # Extract review ID from submission
+        REVIEW_ID=$(echo "$SUBMIT_RESPONSE" | jq -r '.review_id // "unknown"')
+
+        # Step 2: Fetch review results
+        REVIEW=$(curl -s "${{ inputs.api-url }}/review/$REVIEW_ID" \
+          -H "X-API-Key: ${{ inputs.api-key }}")
+
+        # Extract metrics from results
         SCORE=$(echo "$REVIEW" | jq -r '.compliance_score // 0')
         VIOLATIONS=$(echo "$REVIEW" | jq -r '.violations | length')
         CRITICAL=$(echo "$REVIEW" | jq '[.violations[] | select(.severity=="critical")] | length')
-        REVIEW_ID=$(echo "$REVIEW" | jq -r '.review_id // "unknown"')
 
         # Set outputs
         echo "score=$SCORE" >> $GITHUB_OUTPUT
