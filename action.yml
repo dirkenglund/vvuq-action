@@ -1,0 +1,177 @@
+name: 'VVUQ Code Quality'
+description: 'Automatic code review using VVUQ-MCP multi-agent system - like SonarCloud but with formal verification'
+author: 'Dirk Englund'
+
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
+inputs:
+  api-key:
+    description: 'VVUQ API key (generate at vvuq.dirkenglund.org or via: python -m vvuq_mcp.auth)'
+    required: true
+  api-url:
+    description: 'VVUQ API base URL'
+    required: false
+    default: 'https://vvuq.dirkenglund.org'
+  rulesets:
+    description: 'Comma-separated rulesets to apply (security:v1.0.0,architecture:v1.0.0,deception:v1.0.0)'
+    required: false
+    default: 'security:v1.0.0,architecture:v1.0.0,deception:v1.0.0'
+  quality-gate:
+    description: 'Minimum compliance score (0.0-1.0)'
+    required: false
+    default: '0.8'
+  fail-on-critical:
+    description: 'Fail if any critical violations found'
+    required: false
+    default: 'true'
+  post-comment:
+    description: 'Post results as PR comment'
+    required: false
+    default: 'true'
+
+outputs:
+  compliance-score:
+    description: 'Compliance score (0.0-1.0)'
+    value: ${{ steps.analysis.outputs.score }}
+  violations-count:
+    description: 'Total violations found'
+    value: ${{ steps.analysis.outputs.violations }}
+  critical-count:
+    description: 'Critical violations count'
+    value: ${{ steps.analysis.outputs.critical }}
+  review-id:
+    description: 'VVUQ review ID'
+    value: ${{ steps.analysis.outputs.review_id }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        if ! command -v jq &> /dev/null; then
+          sudo apt-get update -qq || true
+          sudo apt-get install -y jq bc || brew install jq || true
+        fi
+
+    - name: Get changed files
+      id: changed
+      uses: tj-actions/changed-files@v44
+      with:
+        files: |
+          **/*.py
+          **/*.js
+          **/*.ts
+          **/*.tsx
+          **/*.java
+          **/*.cpp
+          **/*.c
+          **/*.go
+
+    - name: VVUQ Analysis
+      id: analysis
+      if: steps.changed.outputs.any_changed == 'true'
+      shell: bash
+      run: |
+        # Combine changed files
+        CODE=""
+        for file in ${{ steps.changed.outputs.all_changed_files }}; do
+          if [ -f "$file" ]; then
+            CODE="$CODE\n\n### File: $file\n$(cat $file)"
+          fi
+        done
+
+        # Convert rulesets CSV to JSON array
+        IFS=',' read -ra RULESETS_ARRAY <<< "${{ inputs.rulesets }}"
+        RULESETS_JSON=$(printf '%s\n' "${RULESETS_ARRAY[@]}" | jq -R . | jq -s .)
+
+        # Submit for review
+        REVIEW=$(curl -s -X POST "${{ inputs.api-url }}/review/submit" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"content\": $(echo \"$CODE\" | jq -Rs .),
+            \"rulesets\": $RULESETS_JSON,
+            \"content_type\": \"auto\"
+          }")
+
+        # Extract metrics
+        SCORE=$(echo "$REVIEW" | jq -r '.compliance_score // 0')
+        VIOLATIONS=$(echo "$REVIEW" | jq -r '.violations | length')
+        CRITICAL=$(echo "$REVIEW" | jq '[.violations[] | select(.severity=="critical")] | length')
+        REVIEW_ID=$(echo "$REVIEW" | jq -r '.review_id // "unknown"')
+
+        # Set outputs
+        echo "score=$SCORE" >> $GITHUB_OUTPUT
+        echo "violations=$VIOLATIONS" >> $GITHUB_OUTPUT
+        echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+        echo "review_id=$REVIEW_ID" >> $GITHUB_OUTPUT
+
+        # Save review for comment step
+        echo "$REVIEW" > /tmp/vvuq-review.json
+
+    - name: Post PR Comment
+      if: steps.changed.outputs.any_changed == 'true' && inputs.post-comment == 'true' && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const review = JSON.parse(fs.readFileSync('/tmp/vvuq-review.json', 'utf8'));
+
+          const score = review.compliance_score || 0;
+          const violations = review.violations || [];
+          const critical = violations.filter(v => v.severity === 'critical').length;
+          const high = violations.filter(v => v.severity === 'high').length;
+
+          const scorePercent = (score * 100).toFixed(1);
+          const status = score >= 0.8 ? '✅ PASSED' : '❌ FAILED';
+
+          let comment = `## 🔍 VVUQ Code Quality Report\n\n`;
+          comment += `| Metric | Value |\n|--------|-------|\n`;
+          comment += `| **Status** | ${status} |\n`;
+          comment += `| **Compliance Score** | ${scorePercent}% |\n`;
+          comment += `| 🔴 Critical | ${critical} |\n`;
+          comment += `| 🟡 High | ${high} |\n`;
+          comment += `| **Total** | ${violations.length} |\n\n`;
+
+          if (critical > 0) {
+            comment += `### 🔴 Critical Issues\n\n`;
+            violations.filter(v => v.severity === 'critical').forEach((v, i) => {
+              comment += `${i+1}. **${v.rule_name}** at \`${v.file}:${v.line}\`\n`;
+              comment += `   ${v.evidence}\n\n`;
+            });
+          }
+
+          comment += `---\n🔗 Powered by [VVUQ-MCP](https://vvuq.dirkenglund.org)\n`;
+
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body: comment
+          });
+
+    - name: Quality Gate
+      if: steps.changed.outputs.any_changed == 'true'
+      shell: bash
+      run: |
+        SCORE="${{ steps.analysis.outputs.score }}"
+        CRITICAL="${{ steps.analysis.outputs.critical }}"
+        THRESHOLD="${{ inputs.quality-gate }}"
+
+        echo "📊 Quality Gate:"
+        echo "   Score: $SCORE (threshold: $THRESHOLD)"
+        echo "   Critical: $CRITICAL"
+
+        if (( $(echo "$SCORE < $THRESHOLD" | bc -l) )); then
+          echo "❌ FAILED: Score below threshold"
+          exit 1
+        fi
+
+        if [ "${{ inputs.fail-on-critical }}" == "true" ] && [ "$CRITICAL" -gt "0" ]; then
+          echo "❌ FAILED: Critical violations found"
+          exit 1
+        fi
+
+        echo "✅ PASSED"
